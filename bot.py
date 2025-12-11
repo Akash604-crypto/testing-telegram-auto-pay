@@ -1,12 +1,4 @@
 # bot.py
-"""
-Polling Telegram payment bot.
-- Exposes main() which starts polling (so it can be launched from app.py background thread).
-- Persists runtime state to DATA_DIR/paymentbot.json (same path as app.py).
-- Admin approves forwarded payment proofs; bot creates single-use invite links (creates_join_request=True)
-  and then admin can click "Send access link to user" to deliver the invite link (user then sends join request).
-"""
-
 import os
 import json
 import tempfile
@@ -14,6 +6,7 @@ import shutil
 import logging
 import threading
 import time
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -29,11 +22,11 @@ from telegram.ext import (
     ChatJoinRequestHandler,
 )
 
-# ----- logging -----
+# ---- logging ----
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger("paymentbot.bot")
+logger = logging.getLogger(__name__)
 
-# ----- env/defaults -----
+# ---- env / defaults ----
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
@@ -50,14 +43,17 @@ CRYPTO_NETWORK = os.getenv("CRYPTO_NETWORK", "BEP20")
 REMITLY_INFO = os.getenv("REMITLY_INFO", "")
 REMITLY_HOW_TO_PAY_LINK = os.getenv("REMITLY_HOW_TO_PAY_LINK", "")
 
-HELP_BOT_USERNAME = os.getenv("HELP_BOT_USERNAME", "@HelpBot")
+HELP_BOT_USERNAME = os.getenv("HELP_BOT_USERNAME", "@Dark123222_bot")
 HELP_BOT_USERNAME_MD = HELP_BOT_USERNAME.replace("_", "\\_")
 
+# persistence path
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 DATA_FILE = os.path.join(DATA_DIR, "paymentbot.json")
 
+# timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# prices & labels
 PRICE_CONFIG = {
     "vip": {"upi_inr": 499, "crypto_usd": 6, "remit_inr": 499},
     "dark": {"upi_inr": 1999, "crypto_usd": 24, "remit_inr": 1999},
@@ -65,14 +61,14 @@ PRICE_CONFIG = {
 }
 PLAN_LABELS = {"vip": "VIP Channel", "dark": "Dark Channel", "both": "VIP + Dark (Combo 30% OFF)"}
 
-# ----- runtime state -----
+# runtime state
 PENDING_PAYMENTS: Dict[str, Dict[str, Any]] = {}
 PURCHASE_LOG: list = []
 KNOWN_USERS: set = set()
 SENT_INVITES: dict = {}
 CONFIG: dict = {}
 
-# ----- helpers -----
+# ---- helpers ----
 def now_ist() -> datetime:
     return datetime.now(IST)
 
@@ -82,18 +78,18 @@ def is_admin(user_id: int) -> bool:
 def _ensure_data_dir():
     try:
         Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        logger.exception("Could not ensure data dir: %s", e)
+    except Exception:
+        logger.exception("Could not ensure data dir")
 
 def _serialize_state() -> dict:
     return {
         "pending_payments": PENDING_PAYMENTS,
         "purchase_log": [
-            {**{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in p.items()}}
+            {**{k: (v.isoformat() if isinstance(v, datetime) else v) for k,v in p.items()}}
             for p in PURCHASE_LOG
         ],
         "known_users": list(KNOWN_USERS),
-        "sent_invites": {str(k): v for k, v in SENT_INVITES.items()},
+        "sent_invites": {str(k): v for k,v in SENT_INVITES.items()},
         "config": CONFIG,
     }
 
@@ -115,7 +111,7 @@ def _deserialize_state(data: dict):
     KNOWN_USERS = set(data.get("known_users", []) or [])
     sent = data.get("sent_invites", {}) or {}
     new_sent = {}
-    for k, v in sent.items():
+    for k,v in sent.items():
         try:
             new_sent[int(k)] = v
         except Exception:
@@ -132,8 +128,8 @@ def save_state():
             json.dump(payload, f, ensure_ascii=False, indent=2)
         shutil.move(tmp, DATA_FILE)
         logger.info("State saved to %s", DATA_FILE)
-    except Exception as e:
-        logger.exception("Failed to save state: %s", e)
+    except Exception:
+        logger.exception("Failed to save state")
 
 def load_state():
     try:
@@ -144,10 +140,10 @@ def load_state():
             data = json.load(f)
         _deserialize_state(data)
         logger.info("Loaded state from %s", DATA_FILE)
-    except Exception as e:
-        logger.exception("Failed to load state: %s", e)
+    except Exception:
+        logger.exception("Failed to load state")
 
-# ----- invite creation & sending -----
+# ---- invite creation & delivery ----
 async def create_and_store_invites(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str, require_join_request: bool = True):
     created = {}
     try:
@@ -174,8 +170,8 @@ async def create_and_store_invites(context: ContextTypes.DEFAULT_TYPE, user_id: 
                 user_links["dark"] = dark_obj.invite_link
                 save_state()
             created["dark"] = user_links.get("dark")
-    except Exception as e:
-        logger.exception("Error creating invite links for user %s: %s", user_id, e)
+    except Exception:
+        logger.exception("Error creating invite links")
     return created
 
 async def send_invites_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str):
@@ -201,7 +197,7 @@ def get_price(plan: str, method: str):
         return plan_cfg.get("remit_inr"), "INR"
     return None, ""
 
-# ----- handlers -----
+# ---- handlers ----
 async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     req = update.chat_join_request
     if not req:
@@ -210,7 +206,7 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
     chat = req.chat
     user_id = requester.id
     chat_id = chat.id
-    logger.info("Received join request from %s (%s) for chat %s", requester.username, user_id, chat_id)
+    logger.info("Join request from %s (%s) for chat %s", requester.username, user_id, chat_id)
 
     def user_has_access_for_chat(uid: int, chat_id: int) -> bool:
         for p in PURCHASE_LOG:
@@ -240,11 +236,11 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
             await context.bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
             logger.info("Declined join request for %s into chat %s", user_id, chat_id)
             try:
-                await context.bot.send_message(chat_id=user_id, text="❌ We couldn't verify a purchase for this channel. Contact support.")
+                await context.bot.send_message(chat_id=user_id, text="❌ We couldn't verify a purchase for this channel. Please contact support.")
             except Exception:
                 pass
-    except Exception as e:
-        logger.exception("Error approving/declining join request: %s", e)
+    except Exception:
+        logger.exception("Error approving/declining join request")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -281,12 +277,10 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["selected_plan"] = plan
         context.user_data["waiting_for_proof"] = None
         context.user_data["payment_deadline"] = None
-
         label = PLAN_LABELS.get(plan, plan.upper())
         upi_price, _ = get_price(plan, "upi")
         crypto_price, _ = get_price(plan, "crypto")
         remit_price, _ = get_price(plan, "remitly")
-
         keyboard = [
             [InlineKeyboardButton(f"💳 UPI (₹{upi_price})", callback_data="pay_upi")],
             [InlineKeyboardButton(f"🪙 Crypto (${crypto_price})", callback_data="pay_crypto")],
@@ -302,7 +296,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "plan_help":
-        help_text = ("🆘 *Help & Support*\n\n" f"For any assistance, contact: {HELP_BOT_USERNAME_MD}\n\nType /start anytime to restart.")
+        help_text = ("🆘 *Help & Support*\n\n" f"For assistance, contact: {HELP_BOT_USERNAME_MD}\n\nType /start anytime to restart.")
         try:
             await query.message.edit_text(help_text, parse_mode="Markdown")
         except Exception:
@@ -323,14 +317,11 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         method_map = {"pay_upi": "upi", "pay_crypto": "crypto", "pay_remitly": "remitly"}
         method = method_map[data]
         context.user_data["waiting_for_proof"] = method
-
         amount, currency = get_price(user_plan, method)
         label = PLAN_LABELS.get(user_plan, user_plan.upper())
-
         deadline = now_ist() + timedelta(minutes=30)
         context.user_data["payment_deadline"] = deadline.timestamp()
         deadline_str = deadline.strftime("%d %b %Y, %I:%M %p IST")
-
         if method == "upi":
             msg = (
                 "🧾 *UPI Payment Instructions*\n\n"
@@ -371,7 +362,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    # admin actions for pending payments
+    # admin callbacks (approve/decline/sendlink)
     if data.startswith("approve:") or data.startswith("decline:") or data.startswith("sendlink:"):
         action, payment_id = data.split(":", 1)
         payment = PENDING_PAYMENTS.get(payment_id)
@@ -400,7 +391,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "currency": currency,
             })
             save_state()
-            # create invite links which require join request (admin approves final join via bot)
             links = await create_and_store_invites(context, user_id, plan, require_join_request=True)
             kb = [
                 [
@@ -431,7 +421,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=user_id, text=("❌ Your payment could not be verified.\nIf this is a mistake, please send a clearer screenshot or contact support: " + HELP_BOT_USERNAME))
             except Exception:
-                logger.exception("Can't send decline message to user")
+                logger.exception("Can't send decline message")
             await query.message.reply_text(f"❌ Declined payment (ID: {payment_id})")
             PENDING_PAYMENTS.pop(payment_id, None)
             save_state()
@@ -446,6 +436,7 @@ async def handle_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYP
     plan = context.user_data.get("selected_plan")
     if not method or not plan:
         return
+
     amount, currency = get_price(plan, method)
     payment_id = str(message.message_id) + "_" + str(int(datetime.now().timestamp()))
     PENDING_PAYMENTS[payment_id] = {
@@ -457,10 +448,12 @@ async def handle_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYP
         "currency": currency,
     }
     save_state()
+
     try:
         await context.bot.forward_message(chat_id=ADMIN_CHAT_ID, from_chat_id=chat.id, message_id=message.message_id)
     except Exception:
         logger.exception("Forwarding failed")
+
     kb = [[InlineKeyboardButton("✅ Approve", callback_data=f"approve:{payment_id}"), InlineKeyboardButton("❌ Decline", callback_data=f"decline:{payment_id}")]]
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=(f"💰 New payment request\nFrom: @{user.username or 'NoUsername'} (ID: {user.id})\nPlan: {PLAN_LABELS.get(plan, plan)}\nMethod: {method.upper()}\nAmount: {amount} {currency}\nPayment ID: {payment_id}\n\nCheck forwarded message and choose:"), reply_markup=InlineKeyboardMarkup(kb))
     await message.reply_text("✅ Payment proof received. We'll verify and send access after approval.")
@@ -472,7 +465,7 @@ async def warn_text_not_allowed(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await update.message.reply_text("⚠️ Please send a screenshot/photo or document of your payment only. Plain text messages cannot be verified.", parse_mode="Markdown")
 
-# ----- admin commands (minimal set) -----
+# admin commands (broadcast, income, set_price, set_upi, set_crypto, set_remitly)
 async def set_vip_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global VIP_CHANNEL_ID
     user = update.effective_user
@@ -523,14 +516,128 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             failed += 1
     await update.message.reply_text(f"Broadcast done.\n✅ Sent: {sent}\n❌ Failed: {failed}")
 
-# ----- startup / main -----
-def main():
-    import asyncio  # local import so file-level imports still clean
+async def income(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    mode = "today"
+    if context.args:
+        mode = context.args[0].lower()
+    now = now_ist()
+    if mode == "yesterday":
+        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        label = "Yesterday"
+    elif mode in ("7d", "7days", "last7"):
+        end = now
+        start = now - timedelta(days=7)
+        label = "Last 7 days"
+    else:
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        label = "Today"
+    total_inr = 0
+    total_usd = 0
+    count = 0
+    for p in PURCHASE_LOG:
+        t = p.get("time")
+        if isinstance(t, str):
+            try:
+                t = datetime.fromisoformat(t)
+            except Exception:
+                continue
+        if start <= t < end:
+            count += 1
+            if p.get("currency") == "INR":
+                total_inr += p.get("amount") or 0
+            elif p.get("currency") == "USD":
+                total_usd += p.get("amount") or 0
+    msg = (f"📊 *Income Insights – {label}*\n\n"
+           f"Total orders: *{count}*\n"
+           f"INR collected: *₹{total_inr}*\n"
+           f"USD collected (crypto): *${total_usd}*\n\n"
+           "_Note: stats persist between restarts._")
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-    _ensure_data_dir()
+async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    if len(context.args) != 3:
+        await update.message.reply_text("Usage: /set_price <vip|dark|both> <upi|crypto|remitly> <amount>\nExample: /set_price vip upi 599")
+        return
+    plan, method, amount_str = context.args
+    plan = plan.lower()
+    method = method.lower()
+    if plan not in PRICE_CONFIG or method not in ("upi", "crypto", "remitly"):
+        await update.message.reply_text("Invalid plan or method.")
+        return
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        await update.message.reply_text("Amount must be a number.")
+        return
+    cfg = CONFIG.setdefault("price_config", {})
+    plan_cfg = cfg.setdefault(plan, PRICE_CONFIG.get(plan, {})).copy()
+    if method == "upi":
+        plan_cfg["upi_inr"] = amount
+    elif method == "crypto":
+        plan_cfg["crypto_usd"] = amount
+    else:
+        plan_cfg["remit_inr"] = amount
+    cfg[plan] = plan_cfg
+    CONFIG["price_config"] = cfg
+    save_state()
+    await update.message.reply_text(f"Updated price for {PLAN_LABELS.get(plan, plan)} [{method}] to {amount}.")
+
+async def set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global UPI_ID
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /set_upi <upi_id>")
+        return
+    UPI_ID = context.args[0]
+    CONFIG.setdefault("payment", {})["upi_id"] = UPI_ID
+    save_state()
+    await update.message.reply_text(f"UPI ID updated to: {UPI_ID}")
+
+async def set_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global CRYPTO_ADDRESS
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /set_crypto <address>")
+        return
+    CRYPTO_ADDRESS = context.args[0]
+    CONFIG.setdefault("payment", {})["crypto_address"] = CRYPTO_ADDRESS
+    save_state()
+    await update.message.reply_text(f"Crypto address updated to: {CRYPTO_ADDRESS}")
+
+async def set_remitly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global REMITLY_INFO
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /set_remitly <short description>")
+        return
+    REMITLY_INFO = " ".join(context.args)
+    CONFIG.setdefault("payment", {})["remitly_info"] = REMITLY_INFO
+    save_state()
+    await update.message.reply_text(f"Remitly info updated to:\n{REMITLY_INFO}")
+
+# ---- main() (called by app.py from a background thread) ----
+def main():
+    """
+    Build the Application and start polling.
+    IMPORTANT: do NOT call main() at import time. app.py will import this module and call main() in a thread.
+    """
+    # load persisted state (so the bot has latest PURCHASE_LOG / SENT_INVITES)
     load_state()
 
-    # apply persisted CONFIG overrides
     global VIP_CHANNEL_ID, DARK_CHANNEL_ID, UPI_ID, CRYPTO_ADDRESS, REMITLY_INFO
     if CONFIG.get("channels", {}).get("vip"):
         try:
@@ -554,31 +661,26 @@ def main():
     if not ADMIN_CHAT_ID:
         raise RuntimeError("ADMIN_CHAT_ID missing")
 
-    # IMPORTANT: ensure this thread has an asyncio event loop (needed when main() is called from a background thread)
-    try:
-        # If a loop already exists this returns it; otherwise raises RuntimeError
-        asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # user handlers
+    # handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_buttons))
     app.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_payment_proof))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, warn_text_not_allowed))
 
-    # admin handlers
     app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("income", income))
+    app.add_handler(CommandHandler("set_price", set_price))
+    app.add_handler(CommandHandler("set_upi", set_upi))
+    app.add_handler(CommandHandler("set_crypto", set_crypto))
+    app.add_handler(CommandHandler("set_remitly", set_remitly))
     app.add_handler(CommandHandler("set_vip", set_vip_channel))
     app.add_handler(CommandHandler("set_dark", set_dark_channel))
 
-    # join request handler
     app.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
 
-    # autosave background thread
+    # autosave background thread (daemon)
     def _autosave_loop():
         try:
             while True:
@@ -590,17 +692,19 @@ def main():
         except Exception:
             logger.exception("Autosave thread stopped")
 
-    t = threading.Thread(target=_autosave_loop, daemon=True)
-    t.start()
+    thr = threading.Thread(target=_autosave_loop, daemon=True)
+    thr.start()
 
+    # When main() is run inside a non-main thread we must ensure an asyncio loop exists for that thread.
     try:
-        logger.info("Bot polling started.")
-        app.run_polling()
-    finally:
-        try:
-            save_state()
-        except Exception:
-            logger.exception("Final save failed")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    except Exception:
+        logger.exception("Could not create/set event loop for thread; continuing...")
 
+    logger.info("Bot starting (polling)...")
+    # This will block until stopped
+    app.run_polling()
 
-
+# DO NOT call main() here. app.py will import this module and call bot.main() in a thread.
+# End of bot.py
