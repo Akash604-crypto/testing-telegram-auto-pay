@@ -191,14 +191,30 @@ def create_invite_and_send(user_id: int, plan: str):
 
 # FastAPI app for webhook
 app = FastAPI()
+import threading
+
+@app.on_event("startup")
+def start_bot_thread():
+    # run bot.main() in a separate daemon thread so uvicorn (FastAPI) keeps serving
+    t = threading.Thread(target=main, daemon=True)
+    t.start()
+    logger.info("Started Telegram polling bot in background thread (startup).")
 
 def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
     # Razorpay uses HMAC SHA256
+import base64
+import hmac
+import hashlib
+
+def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
+    # Razorpay sends base64(hmac_sha256(body, secret))
     if not secret:
         logger.warning("No RAZORPAY_WEBHOOK_SECRET set - rejecting webhooks")
         return False
-    computed = hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(computed, signature)
+    computed_hmac = hmac.new(secret.encode(), body_bytes, hashlib.sha256).digest()
+    expected_sig = base64.b64encode(computed_hmac).decode()
+    return hmac.compare_digest(expected_sig, signature)
+
 
 @app.post("/razorpay_webhook")
 async def razorpay_webhook(request: Request):
