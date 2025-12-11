@@ -1,38 +1,28 @@
-# Use official Python slim image
+# Dockerfile
 FROM python:3.11-slim
 
-# install system deps (tesseract + fonts + build essentials)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      tesseract-ocr \
-      libtesseract-dev \
-      gcc \
-      libjpeg-dev \
-      libpng-dev \
-      libwebp-dev \
-      zlib1g-dev \
-      libtiff5 \
-      fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/*
+# install system deps (tesseract + fonts if OCR needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    libtesseract-dev \
+    poppler-utils \
+    pkg-config \
+    gcc \
+    libjpeg-dev \
+    zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user and persistent data directory
-RUN useradd -m appuser
-RUN mkdir -p /data && chown appuser:appuser /data
-
-WORKDIR /opt/app
-
-COPY requirements.txt /opt/app/requirements.txt
+WORKDIR /app
+COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . /opt/app
-RUN chown -R appuser:appuser /opt/app
+COPY . /app
 
-USER appuser
+# Make /data usable by non-root (Render uses 'appuser' in their starter; keep simple)
+RUN mkdir -p /data && chown -R 1000:1000 /data || true
+
 ENV DATA_DIR=/data
+EXPOSE 8000
 
-CMD ["python", "bot.py"]
-
-USER appuser
-
-# Expose nothing (background worker). Start polling.
-CMD ["python", "bot.py"]
+# start uvicorn (the python script will also start the bot in a background thread)
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
