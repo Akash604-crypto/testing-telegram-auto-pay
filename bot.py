@@ -6,6 +6,11 @@ import shutil
 import logging
 import threading
 import time
+import base64
+
+import requests
+
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +50,32 @@ REMITLY_HOW_TO_PAY_LINK = os.getenv("REMITLY_HOW_TO_PAY_LINK", "")
 
 HELP_BOT_USERNAME = os.getenv("HELP_BOT_USERNAME", "@Dark123222_bot")
 HELP_BOT_USERNAME_MD = HELP_BOT_USERNAME.replace("_", "\\_")
+RAZORPAY_KEY = os.getenv("RAZORPAY_KEY")
+RAZORPAY_SECRET = os.getenv("RAZORPAY_SECRET")
+
+def create_payment_link(amount_paise, tg_id, plan):
+    url = "https://api.razorpay.com/v1/payment_links"
+
+    payload = {
+        "amount": amount_paise,
+        "currency": "INR",
+        "description": f"{plan.upper()} Channel Access",
+        "notes": {
+            "telegram_user_id": str(tg_id),
+            "plan": plan
+        }
+    }
+
+    auth = base64.b64encode(f"{RAZORPAY_KEY}:{RAZORPAY_SECRET}".encode()).decode()
+
+    headers = {
+        "Authorization": f"Basic {auth}",
+        "Content-Type": "application/json"
+    }
+
+    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    return r.json()
+
 
 # persistence path
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -323,22 +354,14 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["payment_deadline"] = deadline.timestamp()
         deadline_str = deadline.strftime("%d %b %Y, %I:%M %p IST")
         if method == "upi":
-            msg = (
-                "🧾 *UPI Payment Instructions*\n\n"
-                f"Plan: *{label}*\n"
-                f"Amount: *₹{amount}*\n\n"
-                f"UPI ID: `{UPI_ID}`\n\n"
-                "1️⃣ Open any UPI app (GPay, PhonePe, Paytm, etc.)\n"
-                "2️⃣ Choose *Scan & Pay* or *Pay UPI ID*\n"
-                "3️⃣ Either scan the QR image below or pay directly to the UPI ID above.\n"
-                "4️⃣ Enter the amount shown above and confirm.\n\n"
-                f"If you're confused, see this guide: {UPI_HOW_TO_PAY_LINK}\n\n"
-                f"⏳ Time limit: until *{deadline_str}*\n\n"
-                "After payment send screenshot/photo here plus optional UTR."
-            )
-            await query.message.reply_text(msg, parse_mode="Markdown")
-            if UPI_QR_URL:
-                await query.message.reply_photo(photo=UPI_QR_URL, caption=f"📷 Scan this QR to pay.\nUPI ID: `{UPI_ID}`", parse_mode="Markdown")
+result = create_payment_link(49900, update.effective_user.id, "vip")
+payment_url = result.get("short_url")
+
+await update.message.reply_text(
+    f"Click below to pay securely via Razorpay:\n\n{payment_url}"
+)
+
+           
         elif method == "crypto":
             msg = (
                 "🪙 *Crypto Payment Instructions*\n\n"
