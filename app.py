@@ -191,7 +191,7 @@ def create_invite_and_send(user_id: int, plan: str):
 
 # FastAPI app for webhook
 app = FastAPI()
-import threading
+
 
 @app.on_event("startup")
 def start_bot_thread():
@@ -202,9 +202,6 @@ def start_bot_thread():
 
 def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
     # Razorpay uses HMAC SHA256
-import base64
-import hmac
-import hashlib
 
 def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
     # Razorpay sends base64(hmac_sha256(body, secret))
