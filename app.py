@@ -15,14 +15,14 @@ from typing import Any, Dict
 
 import requests
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 
 # ---- Logging ----
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("paymentbot")
 
 # ---- Env (set these in Render) ----
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")             # Telegram bot token
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 VIP_CHANNEL_ID = int(os.getenv("VIP_CHANNEL_ID", "0"))
 DARK_CHANNEL_ID = int(os.getenv("DARK_CHANNEL_ID", "0"))
@@ -47,7 +47,7 @@ KNOWN_USERS: set = set()
 SENT_INVITES: dict = {}
 CONFIG: dict = {}
 
-def now_ist():
+def now_ist() -> datetime:
     return datetime.now(IST)
 
 # persistence helpers
@@ -187,8 +187,8 @@ def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) ->
         computed = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).digest()
         expected_sig = base64.b64encode(computed).decode("utf-8")
         return hmac.compare_digest(expected_sig, signature)
-    except Exception as e:
-        logger.exception("Error verifying signature: %s", e)
+    except Exception:
+        logger.exception("Error verifying signature")
         return False
 
 @app.post("/razorpay_webhook")
@@ -274,7 +274,6 @@ def start_bot_in_background():
     try:
         import importlib
         bot_mod = importlib.import_module("bot")
-        # start bot.main() in daemon thread if available
         if hasattr(bot_mod, "main"):
             def _run_bot():
                 try:
@@ -293,11 +292,10 @@ def start_bot_in_background():
 @app.on_event("startup")
 async def on_startup():
     load_state()
-    # start bot background thread (optional)
     start_bot_in_background()
     logger.info("Webhook service started; bot background start attempted (if bot.py present).")
 
 # lightweight health endpoint
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "time": now_ist().isoformat()}
+    return JSONResponse({"status": "ok", "time": now_ist().isoformat()})
