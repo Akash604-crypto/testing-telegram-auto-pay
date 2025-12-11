@@ -21,22 +21,16 @@ from fastapi.responses import PlainTextResponse
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("paymentbot")
 
-# ---- Env ----
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Telegram bot token
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # your admin id
-
-# channels (fill or set via /set_vip etc)
+# ---- Env (set these in Render) ----
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")             # Telegram bot token
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 VIP_CHANNEL_ID = int(os.getenv("VIP_CHANNEL_ID", "0"))
 DARK_CHANNEL_ID = int(os.getenv("DARK_CHANNEL_ID", "0"))
-
-# Razorpay webhook secret (set this to the "Secret" you enter in Razorpay webhook config)
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
-
-# Where to persist
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 DATA_FILE = os.path.join(DATA_DIR, "paymentbot.json")
 
-# other payment display info
+# payment info defaults (can override via /set_x commands in your bot)
 UPI_ID = os.getenv("UPI_ID", "")
 UPI_QR_URL = os.getenv("UPI_QR_URL", "")
 CRYPTO_ADDRESS = os.getenv("CRYPTO_ADDRESS", "")
@@ -53,7 +47,6 @@ KNOWN_USERS: set = set()
 SENT_INVITES: dict = {}
 CONFIG: dict = {}
 
-# helper time
 def now_ist():
     return datetime.now(IST)
 
@@ -123,10 +116,12 @@ def load_state():
     except Exception as e:
         logger.exception("Load failed: %s", e)
 
-# Telegram helper (use HTTP API to create invite link & send message safely from webhook)
+# Telegram HTTP API helper (safe from webhook context)
 def tg_api(method: str, data: dict):
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN not set")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    resp = requests.post(url, json=data, timeout=10)
+    resp = requests.post(url, json=data, timeout=15)
     try:
         resp.raise_for_status()
     except Exception:
@@ -135,70 +130,65 @@ def tg_api(method: str, data: dict):
     return resp.json()
 
 def create_invite_and_send(user_id: int, plan: str):
-    """
-    Creates single-use invite(s) for the plan and sends the link(s) to user_id.
-    Returns dict of links created.
-    """
     links = {}
-    if plan in ("vip", "both") and VIP_CHANNEL_ID:
-        payload = {
-            "chat_id": VIP_CHANNEL_ID,
-            "member_limit": 1,
-            "name": f"user_{user_id}_vip",
-            # you can set creates_join_request True if you want request flow
-            "creates_join_request": False
-        }
-        r = tg_api("createChatInviteLink", payload)
-        link = r.get("result", {}).get("invite_link")
-        if link:
-            links["vip"] = link
+    try:
+        if plan in ("vip", "both") and VIP_CHANNEL_ID:
+            payload = {
+                "chat_id": VIP_CHANNEL_ID,
+                "member_limit": 1,
+                "name": f"user_{user_id}_vip",
+                "creates_join_request": False
+            }
+            r = tg_api("createChatInviteLink", payload)
+            link = r.get("result", {}).get("invite_link")
+            if link:
+                links["vip"] = link
 
-    if plan in ("dark", "both") and DARK_CHANNEL_ID:
-        payload = {
-            "chat_id": DARK_CHANNEL_ID,
-            "member_limit": 1,
-            "name": f"user_{user_id}_dark",
-            "creates_join_request": False
-        }
-        r = tg_api("createChatInviteLink", payload)
-        link = r.get("result", {}).get("invite_link")
-        if link:
-            links["dark"] = link
+        if plan in ("dark", "both") and DARK_CHANNEL_ID:
+            payload = {
+                "chat_id": DARK_CHANNEL_ID,
+                "member_limit": 1,
+                "name": f"user_{user_id}_dark",
+                "creates_join_request": False
+            }
+            r = tg_api("createChatInviteLink", payload)
+            link = r.get("result", {}).get("invite_link")
+            if link:
+                links["dark"] = link
 
-    # store in memory and persist
-    if links:
-        SENT_INVITES.setdefault(user_id, {}).update(links)
-        save_state()
-        # send to user
-        lines = []
-        if "vip" in links:
-            lines.append(f"🔑 VIP Channel:\n{links['vip']}")
-        if "dark" in links:
-            lines.append(f"🕶 Dark Channel:\n{links['dark']}")
-        text = "✅ Payment confirmed — here are your access links:\n\n" + "\n\n".join(lines)
-        try:
-            tg_api("sendMessage", {"chat_id": user_id, "text": text})
-        except Exception:
-            logger.exception("Couldn't send invite message to user")
+        if links:
+            SENT_INVITES.setdefault(user_id, {}).update(links)
+            save_state()
+            lines = []
+            if "vip" in links:
+                lines.append(f"🔑 VIP Channel:\n{links['vip']}")
+            if "dark" in links:
+                lines.append(f"🕶 Dark Channel:\n{links['dark']}")
+            text = "✅ Payment confirmed — here are your access links:\n\n" + "\n\n".join(lines)
+            try:
+                tg_api("sendMessage", {"chat_id": user_id, "text": text})
+            except Exception:
+                logger.exception("Failed to send invite message to user")
+    except Exception:
+        logger.exception("Error creating/sending invites")
     return links
 
-# FastAPI app for webhook
+# FastAPI app & webhook
 app = FastAPI()
 
 def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
     """
-    Razorpay sends X-Razorpay-Signature which is base64(hmac_sha256(body, secret)).
-    Compute HMAC-SHA256 over raw body bytes, base64-encode result and compare.
+    Razorpay X-Razorpay-Signature is base64(hmac_sha256(body, secret)).
     """
     if not secret:
-        logger.warning("No RAZORPAY_WEBHOOK_SECRET set - rejecting webhooks")
+        logger.warning("RAZORPAY_WEBHOOK_SECRET not set; rejecting webhooks")
         return False
     try:
         computed = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).digest()
         expected_sig = base64.b64encode(computed).decode("utf-8")
         return hmac.compare_digest(expected_sig, signature)
     except Exception as e:
-        logger.exception("Error verifying razorpay signature: %s", e)
+        logger.exception("Error verifying signature: %s", e)
         return False
 
 @app.post("/razorpay_webhook")
@@ -212,13 +202,12 @@ async def razorpay_webhook(request: Request):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     payload = await request.json()
-    logger.info("Webhook received: event=%s", payload.get("event"))
     event = payload.get("event", "")
+    logger.info("Webhook received: event=%s", event)
 
-    # Try to find payment entity and notes
+    # find notes (Razorpay payload shapes vary)
     notes = {}
     try:
-        # Payment object may be at payload['payload']['payment']['entity']
         if payload.get("payload", {}).get("payment", {}):
             ent = payload["payload"]["payment"]["entity"]
             notes = ent.get("notes", {}) or {}
@@ -230,7 +219,7 @@ async def razorpay_webhook(request: Request):
     except Exception:
         notes = {}
 
-    # Extract telegram user id and plan (these must be added to the payment link notes when creating link)
+    # parse relevant notes
     tg_id = None
     plan = None
     try:
@@ -242,9 +231,8 @@ async def razorpay_webhook(request: Request):
     except Exception:
         logger.exception("Error parsing notes")
 
-    # Accept only certain events where payment is captured/paid
+    # Accept captured/paid events
     if event in ("payment.captured", "payment.authorized", "payment.link.paid", "payment.paid"):
-        # record purchase in PURCHASE_LOG
         rec = {
             "time": now_ist().isoformat(),
             "razorpay_event": event,
@@ -255,7 +243,6 @@ async def razorpay_webhook(request: Request):
             rec["plan"] = plan
         PURCHASE_LOG.append(rec)
         save_state()
-        # if we have a telegram id, create invite and send
         if tg_id and plan:
             try:
                 create_invite_and_send(tg_id, plan)
@@ -266,3 +253,51 @@ async def razorpay_webhook(request: Request):
     else:
         logger.info("Ignoring event %s", event)
         return PlainTextResponse("ignored")
+
+# Autosave thread (persist state every 60s)
+def _autosave_loop():
+    try:
+        while True:
+            time.sleep(60)
+            try:
+                save_state()
+            except Exception:
+                logger.exception("Autosave failed")
+    except Exception:
+        logger.exception("Autosave thread stopped")
+
+autosave_thr = threading.Thread(target=_autosave_loop, daemon=True)
+autosave_thr.start()
+
+# Try to import and run bot.py (if present). This is optional: if bot.py is not available, webhook still works.
+def start_bot_in_background():
+    try:
+        import importlib
+        bot_mod = importlib.import_module("bot")
+        # start bot.main() in daemon thread if available
+        if hasattr(bot_mod, "main"):
+            def _run_bot():
+                try:
+                    logger.info("Starting bot.main() in background thread")
+                    bot_mod.main()
+                except Exception:
+                    logger.exception("bot.main() crashed")
+            t = threading.Thread(target=_run_bot, daemon=True)
+            t.start()
+        else:
+            logger.warning("Imported bot module but no main() function found.")
+    except Exception:
+        logger.exception("Could not import/start bot.py (this is optional).")
+
+# FastAPI startup event — load state and kick bot
+@app.on_event("startup")
+async def on_startup():
+    load_state()
+    # start bot background thread (optional)
+    start_bot_in_background()
+    logger.info("Webhook service started; bot background start attempted (if bot.py present).")
+
+# lightweight health endpoint
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok", "time": now_ist().isoformat()}
