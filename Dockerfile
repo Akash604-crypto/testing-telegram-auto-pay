@@ -6,27 +6,31 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       tesseract-ocr \
       libtesseract-dev \
-      libleptonica-dev \
-      pkg-config \
       gcc \
       libjpeg-dev \
+      libpng-dev \
+      libwebp-dev \
       zlib1g-dev \
-      poppler-utils \
+      libtiff5 \
       fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app user (non-root)
-RUN useradd --create-home --shell /bin/bash appuser
-WORKDIR /home/appuser/app
-COPY --chown=appuser:appuser . /home/appuser/app
+# Create non-root user and persistent data directory
+RUN useradd -m appuser
+RUN mkdir -p /data && chown appuser:appuser /data
 
-# Install python deps
-ENV PIP_NO_CACHE_DIR=1
-RUN python -m pip install --upgrade pip
+WORKDIR /opt/app
+
+COPY requirements.txt /opt/app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Ensure /data exists for Render disk mount
-RUN mkdir -p /data && chown appuser:appuser /data
+COPY . /opt/app
+RUN chown -R appuser:appuser /opt/app
+
+USER appuser
+ENV DATA_DIR=/data
+
+CMD ["python", "bot.py"]
 
 USER appuser
 
