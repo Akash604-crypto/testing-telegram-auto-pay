@@ -1,9 +1,9 @@
 # app.py
+import os
+import json
 import base64
 import hmac
 import hashlib
-import os
-import json
 import tempfile
 import shutil
 import logging
@@ -16,16 +16,6 @@ from typing import Any, Dict
 import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
 
 # ---- Logging ----
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -75,11 +65,11 @@ def _serialize_state():
     return {
         "pending_payments": PENDING_PAYMENTS,
         "purchase_log": [
-            {**{k: (v.isoformat() if isinstance(v, datetime) else v) for k,v in p.items()}}
+            {**{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in p.items()}}
             for p in PURCHASE_LOG
         ],
         "known_users": list(KNOWN_USERS),
-        "sent_invites": {str(k): v for k,v in SENT_INVITES.items()},
+        "sent_invites": {str(k): v for k, v in SENT_INVITES.items()},
         "config": CONFIG,
     }
 
@@ -101,7 +91,7 @@ def _deserialize_state(data):
     KNOWN_USERS = set(data.get("known_users", []) or [])
     sent = data.get("sent_invites", {}) or {}
     new_sent = {}
-    for k,v in sent.items():
+    for k, v in sent.items():
         try:
             new_sent[int(k)] = v
         except Exception:
@@ -150,7 +140,6 @@ def create_invite_and_send(user_id: int, plan: str):
     Returns dict of links created.
     """
     links = {}
-    headers = {"Content-Type":"application/json"}
     if plan in ("vip", "both") and VIP_CHANNEL_ID:
         payload = {
             "chat_id": VIP_CHANNEL_ID,
@@ -161,7 +150,9 @@ def create_invite_and_send(user_id: int, plan: str):
         }
         r = tg_api("createChatInviteLink", payload)
         link = r.get("result", {}).get("invite_link")
-        links["vip"] = link
+        if link:
+            links["vip"] = link
+
     if plan in ("dark", "both") and DARK_CHANNEL_ID:
         payload = {
             "chat_id": DARK_CHANNEL_ID,
@@ -171,7 +162,8 @@ def create_invite_and_send(user_id: int, plan: str):
         }
         r = tg_api("createChatInviteLink", payload)
         link = r.get("result", {}).get("invite_link")
-        links["dark"] = link
+        if link:
+            links["dark"] = link
 
     # store in memory and persist
     if links:
@@ -193,19 +185,10 @@ def create_invite_and_send(user_id: int, plan: str):
 # FastAPI app for webhook
 app = FastAPI()
 
-
-@app.on_event("startup")
-def start_bot_thread():
-    # run bot.main() in a separate daemon thread so uvicorn (FastAPI) keeps serving
-    t = threading.Thread(target=main, daemon=True)
-    t.start()
-    logger.info("Started Telegram polling bot in background thread (startup).")
-
 def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
     """
     Razorpay sends X-Razorpay-Signature which is base64(hmac_sha256(body, secret)).
-    This function computes HMAC-SHA256 over the raw request body, base64-encodes it,
-    then compares it (constant-time) with the signature header.
+    Compute HMAC-SHA256 over raw body bytes, base64-encode result and compare.
     """
     if not secret:
         logger.warning("No RAZORPAY_WEBHOOK_SECRET set - rejecting webhooks")
@@ -230,8 +213,8 @@ async def razorpay_webhook(request: Request):
 
     payload = await request.json()
     logger.info("Webhook received: event=%s", payload.get("event"))
-    # Handle different event shapes (payment.captured, payment.link.paid, payment.authorized etc.)
     event = payload.get("event", "")
+
     # Try to find payment entity and notes
     notes = {}
     try:
@@ -239,13 +222,10 @@ async def razorpay_webhook(request: Request):
         if payload.get("payload", {}).get("payment", {}):
             ent = payload["payload"]["payment"]["entity"]
             notes = ent.get("notes", {}) or {}
-        # Payment link events may include payload.payment.entity too
         elif payload.get("payload", {}).get("payment_link", {}):
             ent = payload["payload"]["payment_link"]["entity"]
-            # sometimes the link has 'notes' or you may want payload['payload']['payment']['entity']
             notes = ent.get("notes", {}) or {}
         else:
-            # fallback to top-level
             notes = payload.get("payload", {}).get("payment", {}).get("entity", {}).get("notes", {}) or {}
     except Exception:
         notes = {}
@@ -263,7 +243,7 @@ async def razorpay_webhook(request: Request):
         logger.exception("Error parsing notes")
 
     # Accept only certain events where payment is captured/paid
-    if event in ("payment.captured", "payment.authorized", "payment.link.paid", "payment.captured.*", "payment.paid"):
+    if event in ("payment.captured", "payment.authorized", "payment.link.paid", "payment.paid"):
         # record purchase in PURCHASE_LOG
         rec = {
             "time": now_ist().isoformat(),
