@@ -1,8 +1,9 @@
 # app.py
-import os
-import json
+import base64
 import hmac
 import hashlib
+import os
+import json
 import tempfile
 import shutil
 import logging
@@ -201,17 +202,21 @@ def start_bot_thread():
     logger.info("Started Telegram polling bot in background thread (startup).")
 
 def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
-    # Razorpay uses HMAC SHA256
-
-def verify_razorpay_signature(body_bytes: bytes, signature: str, secret: str) -> bool:
-    # Razorpay sends base64(hmac_sha256(body, secret))
+    """
+    Razorpay sends X-Razorpay-Signature which is base64(hmac_sha256(body, secret)).
+    This function computes HMAC-SHA256 over the raw request body, base64-encodes it,
+    then compares it (constant-time) with the signature header.
+    """
     if not secret:
         logger.warning("No RAZORPAY_WEBHOOK_SECRET set - rejecting webhooks")
         return False
-    computed_hmac = hmac.new(secret.encode(), body_bytes, hashlib.sha256).digest()
-    expected_sig = base64.b64encode(computed_hmac).decode()
-    return hmac.compare_digest(expected_sig, signature)
-
+    try:
+        computed = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).digest()
+        expected_sig = base64.b64encode(computed).decode("utf-8")
+        return hmac.compare_digest(expected_sig, signature)
+    except Exception as e:
+        logger.exception("Error verifying razorpay signature: %s", e)
+        return False
 
 @app.post("/razorpay_webhook")
 async def razorpay_webhook(request: Request):
