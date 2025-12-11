@@ -353,14 +353,57 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         deadline = now_ist() + timedelta(minutes=30)
         context.user_data["payment_deadline"] = deadline.timestamp()
         deadline_str = deadline.strftime("%d %b %Y, %I:%M %p IST")
-        if method == "upi":
-result = create_payment_link(49900, update.effective_user.id, "vip")
-payment_url = result.get("short_url")
+if method == "upi":
+            # compute paise from amount (amount is in INR)
+            try:
+                paise = int(float(amount) * 100)
+            except Exception:
+                paise = None
 
-await update.message.reply_text(
-    f"Click below to pay securely via Razorpay:\n\n{payment_url}"
-)
+            # Try create Razorpay payment link only if keys present and paise available
+            payment_url = None
+            if RAZORPAY_KEY and RAZORPAY_SECRET and paise:
+                try:
+                    # create payment link with Telegram user id + plan in notes
+                    result = create_payment_link(paise, user.id, user_plan)
+                    # Razorpay returns 'short_url' for quick link
+                    payment_url = result.get("short_url") or result.get("shortUrl") or result.get("url")
+                    logger.info("Razorpay create link response: %s", result)
+                except Exception as e:
+                    logger.exception("Failed to create Razorpay payment link: %s", e)
+                    payment_url = None
 
+            if payment_url:
+                # send the payment link to the user
+                try:
+                    await query.message.reply_text(
+                        f"🔗 Pay securely with Razorpay:\n\n{payment_url}\n\n"
+                        "After payment is complete Razorpay will notify us and you'll get access automatically.",
+                        disable_web_page_preview=False
+                    )
+                except Exception:
+                    # fallback to plain UPI instructions if reply fails
+                    await query.message.reply_text("Couldn't send the payment link — try again or use the UPI instructions below.")
+                    payment_url = None
+
+            if not payment_url:
+                # fallback: show manual UPI instructions (existing text + QR)
+                msg = (
+                    "🧾 UPI Payment Instructions\n\n"
+                    f"Plan: {label}\n"
+                    f"Amount: ₹{amount}\n\n"
+                    f"UPI ID: {UPI_ID}\n\n"
+                    "1️⃣ Open any UPI app (GPay, PhonePe, Paytm, etc.)\n"
+                    "2️⃣ Choose Scan & Pay or Pay UPI ID\n"
+                    "3️⃣ Either scan the QR image below or pay directly to the UPI ID above.\n"
+                    "4️⃣ Enter the amount shown above and confirm.\n\n"
+                    f"If you're confused, see this guide: {UPI_HOW_TO_PAY_LINK}\n\n"
+                    f"⏳ Time limit: until {deadline_str}\n\n"
+                    "After payment send screenshot/photo here plus optional UTR."
+                )
+                await query.message.reply_text(msg, parse_mode="Markdown")
+                if UPI_QR_URL:
+                    await query.message.reply_photo(photo=UPI_QR_URL, caption=f"📷 Scan this QR to pay.\nUPI ID: {UPI_ID}", parse_mode="Markdown")
            
         elif method == "crypto":
             msg = (
