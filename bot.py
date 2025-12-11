@@ -525,6 +525,8 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----- startup / main -----
 def main():
+    import asyncio  # local import so file-level imports still clean
+
     _ensure_data_dir()
     load_state()
 
@@ -551,6 +553,14 @@ def main():
         raise RuntimeError("BOT_TOKEN missing")
     if not ADMIN_CHAT_ID:
         raise RuntimeError("ADMIN_CHAT_ID missing")
+
+    # IMPORTANT: ensure this thread has an asyncio event loop (needed when main() is called from a background thread)
+    try:
+        # If a loop already exists this returns it; otherwise raises RuntimeError
+        asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -592,5 +602,5 @@ def main():
         except Exception:
             logger.exception("Final save failed")
 
-if __name__ == "__main__":
-    main()
+
+
