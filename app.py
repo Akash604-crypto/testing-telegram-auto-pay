@@ -271,22 +271,43 @@ autosave_thr.start()
 
 # Try to import and run bot.py (if present). This is optional: if bot.py is not available, webhook still works.
 def start_bot_in_background():
+    """
+    Start bot.py as a separate process. This avoids asyncio event-loop-in-thread errors.
+    Child stdout/stderr are streamed to the main logger so you can view bot logs in Render.
+    """
     try:
-        import importlib
-        bot_mod = importlib.import_module("bot")
-        if hasattr(bot_mod, "main"):
-            def _run_bot():
-                try:
-                    logger.info("Starting bot.main() in background thread")
-                    bot_mod.main()
-                except Exception:
-                    logger.exception("bot.main() crashed")
-            t = threading.Thread(target=_run_bot, daemon=True)
-            t.start()
-        else:
-            logger.warning("Imported bot module but no main() function found.")
+        bot_path = Path("bot.py")
+        if not bot_path.exists():
+            logger.warning("bot.py not found; skipping background bot start.")
+            return
+
+        py = sys.executable or "python"
+        cmd = [py, str(bot_path)]
+        logger.info("Spawning bot process: %s", " ".join(shlex.quote(p) for p in cmd))
+
+        # Start the process; keep pipes so we can capture output
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=os.environ)
+
+        # Stream child's stdout to our logger (daemon thread)
+        def _stream_child_output(p):
+            try:
+                if p.stdout is None:
+                    return
+                for raw_line in iter(p.stdout.readline, b""):
+                    try:
+                        line = raw_line.decode("utf-8", "replace").rstrip()
+                        if line:
+                            logger.info("[bot] %s", line)
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception("Error streaming bot child output")
+
+        t = threading.Thread(target=_stream_child_output, args=(proc,), daemon=True)
+        t.start()
+
     except Exception:
-        logger.exception("Could not import/start bot.py (this is optional).")
+        logger.exception("Could not spawn bot.py process")
 
 # FastAPI startup event — load state and kick bot
 @app.on_event("startup")
