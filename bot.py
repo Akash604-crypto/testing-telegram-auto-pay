@@ -353,7 +353,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         deadline = now_ist() + timedelta(minutes=30)
         context.user_data["payment_deadline"] = deadline.timestamp()
         deadline_str = deadline.strftime("%d %b %Y, %I:%M %p IST")
-if method == "upi":
+        if method == "upi":
             # compute paise from amount (amount is in INR)
             try:
                 paise = int(float(amount) * 100)
@@ -369,6 +369,8 @@ if method == "upi":
                     # Razorpay returns 'short_url' for quick link
                     payment_url = result.get("short_url") or result.get("shortUrl") or result.get("url")
                     logger.info("Razorpay create link response: %s", result)
+                    if result.get("error"):
+                        logger.warning("Razorpay returned error: %s", result.get("error"))
                 except Exception as e:
                     logger.exception("Failed to create Razorpay payment link: %s", e)
                     payment_url = None
@@ -389,22 +391,22 @@ if method == "upi":
             if not payment_url:
                 # fallback: show manual UPI instructions (existing text + QR)
                 msg = (
-                    "🧾 UPI Payment Instructions\n\n"
-                    f"Plan: {label}\n"
-                    f"Amount: ₹{amount}\n\n"
-                    f"UPI ID: {UPI_ID}\n\n"
+                    "🧾 *UPI Payment Instructions*\n\n"
+                    f"Plan: *{label}*\n"
+                    f"Amount: *₹{amount}*\n\n"
+                    f"UPI ID: `{UPI_ID}`\n\n"
                     "1️⃣ Open any UPI app (GPay, PhonePe, Paytm, etc.)\n"
-                    "2️⃣ Choose Scan & Pay or Pay UPI ID\n"
+                    "2️⃣ Choose *Scan & Pay* or *Pay UPI ID*\n"
                     "3️⃣ Either scan the QR image below or pay directly to the UPI ID above.\n"
                     "4️⃣ Enter the amount shown above and confirm.\n\n"
                     f"If you're confused, see this guide: {UPI_HOW_TO_PAY_LINK}\n\n"
-                    f"⏳ Time limit: until {deadline_str}\n\n"
+                    f"⏳ Time limit: until *{deadline_str}*\n\n"
                     "After payment send screenshot/photo here plus optional UTR."
                 )
                 await query.message.reply_text(msg, parse_mode="Markdown")
                 if UPI_QR_URL:
-                    await query.message.reply_photo(photo=UPI_QR_URL, caption=f"📷 Scan this QR to pay.\nUPI ID: {UPI_ID}", parse_mode="Markdown")
-           
+                    await query.message.reply_photo(photo=UPI_QR_URL, caption=f"📷 Scan this QR to pay.\nUPI ID: `{UPI_ID}`", parse_mode="Markdown")
+
         elif method == "crypto":
             msg = (
                 "🪙 *Crypto Payment Instructions*\n\n"
