@@ -705,6 +705,8 @@ def main():
     logger.info("Bot starting (polling)...")
     # This will block until stopped
     app.run_polling()
+if __name__ == "__main__":
+    main()
 
 # DO NOT call main() here. app.py will import this module and call bot.main() in a thread.
 # End of bot.py
